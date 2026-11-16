@@ -27,14 +27,30 @@
   }
   function fmtMult(n) { return n.toFixed(3) + '×'; }
 
+  /** Growth multiplier from a row's 7-day change, as lib/model.ts does. */
+  function growthMultOf(row) {
+    var m = DATA.model || {};
+    var g = row.change_7d === null || row.change_7d === undefined ? 0 : Math.min(m.growth_cap === undefined ? 100 : m.growth_cap, Math.max(m.growth_floor === undefined ? -50 : m.growth_floor, row.change_7d));
+    return 1 + (g / 100) * (m.growth_weight === undefined ? 0.4 : m.growth_weight);
+  }
+
+  /** Maturity multiplier at a given age in days, as lib/model.ts does. */
+  function maturityAt(age, m) {
+    m = m || DATA.model || {};
+    var days = m.maturity_days === undefined ? 1460 : m.maturity_days;
+    return (m.maturity_floor === undefined ? 0.7 : m.maturity_floor) + (Math.min(Math.max(age, 0), days) / days) * (m.maturity_range === undefined ? 0.3 : m.maturity_range);
+  }
+
+  /** Implied value of a row if it had run `age` days with no token. */
+  function valueAtAge(row, age) {
+    return Math.max(1, Math.round(row.tvl_usd * row.multiple * growthMultOf(row) * maturityAt(age)));
+  }
+
   /** Recompute one row's implied value from its own figures, as lib/model.ts does. */
   function impliedOf(row) {
     var m = DATA.model || {};
-    var g = row.change_7d === null || row.change_7d === undefined ? 0 : Math.min(m.growth_cap === undefined ? 100 : m.growth_cap, Math.max(m.growth_floor === undefined ? -50 : m.growth_floor, row.change_7d));
-    var growthMult = 1 + (g / 100) * (m.growth_weight === undefined ? 0.4 : m.growth_weight);
     var age = row.age_days === null || row.age_days === undefined ? (m.unknown_age_days === undefined ? 365 : m.unknown_age_days) : row.age_days;
-    var mat = (m.maturity_floor === undefined ? 0.7 : m.maturity_floor) + (Math.min(Math.max(age, 0), m.maturity_days === undefined ? 1460 : m.maturity_days) / (m.maturity_days === undefined ? 1460 : m.maturity_days)) * (m.maturity_range === undefined ? 0.3 : m.maturity_range);
-    return Math.max(1, Math.round(row.tvl_usd * row.multiple * growthMult * mat));
+    return valueAtAge(row, age);
   }
 
   function el(tag, attrs, children) {
@@ -291,9 +307,266 @@
         el('tr', null, [el('td', { text: 'Implied value' }), el('td', { text: fmtUsdFull(r.implied_value_usd) })]),
       ])]),
       el('p', { 'class': 'note', html: 'The page recomputes this row from its own figures and gets ' + fmtUsdFull(recomputed) + ' — the same number the board states. The multiple is the market\u2019s own median market-cap-per-TVL for the category, not a hand-picked number.' }),
+      maturityChart(r),
       el('h3', { text: 'How to farm it' }),
       el('ol', { 'class': 'steps' }, steps),
     ]);
+  }
+
+  /**
+   * Maturity curve: the protocol's implied value as its maturity factor rises
+   * from the floor at day 0 to 1.00 at day 1,460, with everything else held at
+   * today's record. The curve comes from the row's own figures through
+   * valueAtAge — the same code path the detail view recomputes with — so the
+   * chart and the breakdown always agree. It is not a price history: the
+   * snapshot carries no history, and the protocol has no token and no price.
+   * Zoom is wheel-centered on the cursor; drag pans; buttons and arrow keys
+   * work too. The chart draws instantly, with no entrance animation, so
+   * prefers-reduced-motion needs no special case.
+   */
+  function maturityChart(row) {
+    var m = DATA.model || {};
+    var plateauDays = m.maturity_days === undefined ? 1460 : m.maturity_days;
+    var floor = m.maturity_floor === undefined ? 0.7 : m.maturity_floor;
+    var range = m.maturity_range === undefined ? 0.3 : m.maturity_range;
+    var age = row.age_days === null || row.age_days === undefined ? (m.unknown_age_days === undefined ? 365 : m.unknown_age_days) : row.age_days;
+    var ageKnown = row.age_days !== null && row.age_days !== undefined;
+    var xMax = Math.max(1800, Math.ceil(age / 100) * 100);
+    var v0 = valueAtAge(row, 0);
+    var vTop = valueAtAge(row, plateauDays);
+    var pad = (vTop - v0) * 0.08;
+    var full = { x0: 0, x1: xMax, y0: Math.max(0, v0 - pad), y1: vTop + pad };
+    var view = { x0: full.x0, x1: full.x1, y0: full.y0, y1: full.y1 };
+    var layout = { padL: 66, padR: 16, padT: 14, padB: 36, pw: 0, ph: 0, w: 0, h: 0 };
+
+    var section = el('section', { 'class': 'chart' }, [
+      el('h3', { text: 'Maturity curve' }),
+      el('p', { 'class': 'chart-lede', text: 'This is not a price history — ' + row.name + ' has no token and no price. The curve shows what the model\u2019s implied value would be at each age, as the maturity factor rises from ' + floor + ' to ' + (floor + range).toFixed(2) + ' over ' + plateauDays.toLocaleString('en-US') + ' days, with TVL, multiple and growth held at today\u2019s record.' }),
+    ]);
+    var tools = el('div', { 'class': 'chart-tools' }, [
+      el('button', { type: 'button', 'aria-label': 'Zoom in on the chart', text: '+', onclick: function () { zoomAt(0.5, 0.5, 1 / 1.6); } }),
+      el('button', { type: 'button', 'aria-label': 'Zoom out of the chart', text: '−', onclick: function () { zoomAt(0.5, 0.5, 1.6); } }),
+      el('button', { type: 'button', text: 'Reset', onclick: function () { resetView(); } }),
+      el('span', { 'class': 'hint', text: 'Scroll to zoom · drag to pan · arrow keys pan, + / − zoom, 0 resets' }),
+    ]);
+    var canvas = el('canvas', { 'class': 'maturity-chart', tabindex: '0', role: 'img', 'aria-label': 'Line chart of implied value against days with no token for ' + row.name });
+    var wrap = el('div', { 'class': 'chart-wrap' }, [canvas]);
+    var cap = el('p', { 'class': 'chart-cap', text: 'At day 0 the model values ' + row.name + ' at ' + fmtUsdFull(v0) + '; at day ' + plateauDays.toLocaleString('en-US') + ' it reaches ' + fmtUsdFull(vTop) + ' and then stays flat. ' + (ageKnown ? 'Today, at ' + age.toLocaleString('en-US') + ' days, it is ' + fmtUsdFull(row.implied_value_usd) + '.' : 'The first tracked date is unknown, so today is plotted at ' + age + ' days, the model\u2019s fallback age, at ' + fmtUsdFull(row.implied_value_usd) + '.') });
+    section.appendChild(tools);
+    section.appendChild(wrap);
+    section.appendChild(cap);
+
+    canvas._chart = {
+      view: view, full: full, age: age, implied: row.implied_value_usd,
+      valueAt: function (d) { return valueAtAge(row, d); },
+      reset: function () { resetView(); },
+    };
+
+    function clampView() {
+      var minX = 20, minY = (full.y1 - full.y0) * 0.02;
+      if (view.x1 - view.x0 < minX) { var cx = (view.x0 + view.x1) / 2; view.x0 = cx - minX / 2; view.x1 = cx + minX / 2; }
+      if (view.y1 - view.y0 < minY) { var cy = (view.y0 + view.y1) / 2; view.y0 = cy - minY / 2; view.y1 = cy + minY / 2; }
+      if (view.x1 - view.x0 > full.x1 - full.x0) { view.x0 = full.x0; view.x1 = full.x1; }
+      if (view.y1 - view.y0 > full.y1 - full.y0) { view.y0 = full.y0; view.y1 = full.y1; }
+      if (view.x0 < full.x0) { view.x1 += full.x0 - view.x0; view.x0 = full.x0; }
+      if (view.x1 > full.x1) { view.x0 -= view.x1 - full.x1; view.x1 = full.x1; }
+      if (view.y0 < full.y0) { view.y1 += full.y0 - view.y0; view.y0 = full.y0; }
+      if (view.y1 > full.y1) { view.y0 -= view.y1 - full.y1; view.y1 = full.y1; }
+    }
+    function resetView() { view.x0 = full.x0; view.x1 = full.x1; view.y0 = full.y0; view.y1 = full.y1; draw(); }
+    function zoomAt(fx, fy, factor) {
+      var cx = view.x0 + fx * (view.x1 - view.x0);
+      var cy = view.y1 - fy * (view.y1 - view.y0);
+      var nx = (view.x1 - view.x0) * factor;
+      var ny = (view.y1 - view.y0) * factor;
+      view.x0 = cx - fx * nx;
+      view.x1 = view.x0 + nx;
+      view.y0 = cy - (1 - fy) * ny;
+      view.y1 = view.y0 + ny;
+      clampView();
+      draw();
+    }
+
+    function draw() {
+      var w = canvas.clientWidth, h = canvas.clientHeight;
+      if (!w || !h || !canvas.isConnected) return;
+      var dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+      }
+      var ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      var padL = layout.padL, padR = layout.padR, padT = layout.padT, padB = layout.padB;
+      var pw = w - padL - padR, ph = h - padT - padB;
+      if (pw <= 0 || ph <= 0) return;
+      layout.pw = pw; layout.ph = ph; layout.w = w; layout.h = h;
+      function X(d) { return padL + ((d - view.x0) / (view.x1 - view.x0)) * pw; }
+      function Y(v) { return padT + (1 - (v - view.y0) / (view.y1 - view.y0)) * ph; }
+      ctx.font = '11px -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+      ctx.textBaseline = 'middle';
+      // Y gridlines and tick labels (4 ticks across the current view).
+      ctx.strokeStyle = '#1f2b38';
+      ctx.fillStyle = '#64748b';
+      ctx.lineWidth = 1;
+      var i, ty;
+      for (i = 0; i <= 3; i++) {
+        ty = view.y0 + (i / 3) * (view.y1 - view.y0);
+        ctx.beginPath();
+        ctx.moveTo(padL, Y(ty));
+        ctx.lineTo(padL + pw, Y(ty));
+        ctx.stroke();
+        ctx.textAlign = 'right';
+        ctx.fillText(fmtUsd(ty), padL - 8, Y(ty));
+      }
+      // X gridlines and tick labels.
+      var ticks = [0, 365, 730, 1095, plateauDays];
+      if (1800 <= view.x1 && ticks.indexOf(1800) < 0) ticks.push(1800);
+      if (xMax > 1800 && ticks.indexOf(xMax) < 0) ticks.push(xMax);
+      ticks.forEach(function (t) {
+        if (t < view.x0 || t > view.x1) return;
+        ctx.beginPath();
+        ctx.moveTo(X(t), padT);
+        ctx.lineTo(X(t), padT + ph);
+        ctx.stroke();
+        ctx.textAlign = 'center';
+        ctx.fillText(t.toLocaleString('en-US'), X(t), padT + ph + 12);
+      });
+      // Axis titles.
+      ctx.save();
+      ctx.translate(13, padT + ph / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.fillText('Implied value', 0, 0);
+      ctx.restore();
+      ctx.textAlign = 'center';
+      ctx.fillText('Days with no token', padL + pw / 2, h - 6);
+      // Plateau guide at the day maturity maxes out.
+      if (plateauDays >= view.x0 && plateauDays <= view.x1) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = '#64748b';
+        ctx.beginPath();
+        ctx.moveTo(X(plateauDays), padT);
+        ctx.lineTo(X(plateauDays), padT + ph);
+        ctx.stroke();
+        ctx.restore();
+        var platLabel = 'maturity maxes · ' + plateauDays.toLocaleString('en-US') + 'd';
+        var platW = ctx.measureText(platLabel).width;
+        ctx.fillStyle = '#64748b';
+        if (X(plateauDays) + 8 + platW <= padL + pw) { ctx.textAlign = 'left'; ctx.fillText(platLabel, X(plateauDays) + 6, padT + 9); }
+        else { ctx.textAlign = 'right'; ctx.fillText(platLabel, X(plateauDays) - 6, padT + 9); }
+      }
+      // The curve itself, sampled every 10 days (exact: linear to the plateau, flat after).
+      ctx.beginPath();
+      var step = 10, d;
+      for (d = 0; d <= xMax; d += step) {
+        var px = X(d), py = Y(valueAtAge(row, d));
+        if (d === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      if (xMax % step !== 0) ctx.lineTo(X(xMax), Y(valueAtAge(row, xMax)));
+      ctx.strokeStyle = '#4ade80';
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      ctx.lineTo(X(xMax), padT + ph);
+      ctx.lineTo(X(0), padT + ph);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(74, 222, 128, 0.07)';
+      ctx.fill();
+      // Today: vertical guide, dot, and label.
+      var dotX = X(age), dotY = Y(row.implied_value_usd);
+      if (age >= view.x0 && age <= view.x1) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = '#22d3ee';
+        ctx.beginPath();
+        ctx.moveTo(dotX, padT);
+        ctx.lineTo(dotX, padT + ph);
+        ctx.stroke();
+        ctx.restore();
+      }
+      if (dotX >= padL && dotX <= padL + pw && dotY >= padT && dotY <= padT + ph) {
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#4ade80';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#e9eff5';
+        ctx.stroke();
+        var label = 'Today · ' + fmtAge(age) + ' · ' + fmtUsd(row.implied_value_usd);
+        ctx.font = '12px -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+        var lw = ctx.measureText(label).width;
+        var lx = dotX + 10;
+        if (lx + lw + 16 > padL + pw) lx = dotX - 10 - lw - 16;
+        var ly = dotY - 30;
+        if (ly < padT + 2) ly = dotY + 12;
+        ctx.fillStyle = 'rgba(14, 21, 29, 0.92)';
+        ctx.strokeStyle = '#2c3d4f';
+        ctx.beginPath();
+        ctx.rect(lx, ly, lw + 16, 20);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#e9eff5';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, lx + 8, ly + 10);
+      }
+      canvas.dataset.drawn = '1';
+    }
+
+    canvas.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect = canvas.getBoundingClientRect();
+      var fx = (e.clientX - rect.left - layout.padL) / layout.pw;
+      var fy = (e.clientY - rect.top - layout.padT) / layout.ph;
+      if (!isFinite(fx) || !isFinite(fy) || layout.pw <= 0) return;
+      fx = Math.min(1, Math.max(0, fx));
+      fy = Math.min(1, Math.max(0, fy));
+      zoomAt(fx, fy, Math.exp(e.deltaY * 0.0012));
+    }, { passive: false });
+
+    var drag = null;
+    canvas.addEventListener('pointerdown', function (e) {
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* capture is best-effort */ }
+      drag = { x: e.clientX, y: e.clientY, x0: view.x0, x1: view.x1, y0: view.y0, y1: view.y1 };
+      canvas.classList.add('dragging');
+    });
+    canvas.addEventListener('pointermove', function (e) {
+      if (!drag || layout.pw <= 0) return;
+      var dx = (e.clientX - drag.x) / layout.pw * (drag.x1 - drag.x0);
+      var dy = (e.clientY - drag.y) / layout.ph * (drag.y1 - drag.y0);
+      view.x0 = drag.x0 - dx;
+      view.x1 = drag.x1 - dx;
+      view.y0 = drag.y0 + dy;
+      view.y1 = drag.y1 + dy;
+      clampView();
+      draw();
+    });
+    function endDrag() { drag = null; canvas.classList.remove('dragging'); }
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+
+    canvas.addEventListener('keydown', function (e) {
+      var span = 0.1;
+      if (e.key === '+' || e.key === '=') { zoomAt(0.5, 0.5, 1 / 1.6); e.preventDefault(); }
+      else if (e.key === '-') { zoomAt(0.5, 0.5, 1.6); e.preventDefault(); }
+      else if (e.key === '0') { resetView(); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft') { var sx = span * (view.x1 - view.x0); view.x0 -= sx; view.x1 -= sx; clampView(); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowRight') { var sx2 = span * (view.x1 - view.x0); view.x0 += sx2; view.x1 += sx2; clampView(); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { var sy = span * (view.y1 - view.y0); view.y0 += sy; view.y1 += sy; clampView(); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { var sy2 = span * (view.y1 - view.y0); view.y0 -= sy2; view.y1 -= sy2; clampView(); draw(); e.preventDefault(); }
+    });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      var ro = new ResizeObserver(function () { draw(); });
+      ro.observe(canvas);
+    } else {
+      window.addEventListener('resize', draw);
+    }
+    requestAnimationFrame(function () { draw(); });
+    return section;
   }
 
   function methodSection() {
